@@ -13,9 +13,9 @@ from mistralai.client import Mistral
 from .formatter import ResponseFormatter
 from .mcp_client import McpClient
 
-# Configuration logging
+# Configuration logging - Only ERROR and important messages
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("elektra.matrix")
 
@@ -88,7 +88,7 @@ class ElektraAgent:
         results = []
         for cmd in commands:
             cmd = cmd.strip()
-            logger.info(f"Exécution MCP: {cmd[:50]}...")
+            print(f"⚡ Exécution: {cmd[:50]}...")
 
             try:
                 if cmd.startswith("npm "):
@@ -135,16 +135,15 @@ class ElektraMatrixBot:
         if not await self._login():
             return
 
-        logger.info("En attente de messages...")
+        print(f"⚡ Elektra démarré et en attente...")
         await self._sync_loop()
 
     async def _login(self) -> bool:
         """Gère l'authentification (Refactoring: Extract Method)."""
-        logger.info(f"Connexion à {self.url} avec {self.user}...")
         resp = await self.client.login(self.password)
 
         if isinstance(resp, LoginResponse):
-            logger.info(f"Connecté en tant que {resp.user_id}")
+            print(f"✅ Connecté: {resp.user_id}")
             return True
 
         logger.error(f"Échec de connexion : {resp}")
@@ -180,9 +179,7 @@ class ElektraMatrixBot:
         if "elektra" not in event.body.lower():
             return
 
-        logger.info(f"Mention de {event.sender} dans {room.room_id}")
-
-        # Nettoyage et appel agent
+        print(f"📩 Requête de {event.sender}")
         prompt = re.sub(r"(?i)\belektra\b", "", event.body).strip() or "Salut !"
         response_text = await self.agent.chat(prompt, room.room_id)
 
@@ -191,6 +188,7 @@ class ElektraMatrixBot:
         await self.client.room_send(
             room_id=room.room_id, message_type="m.room.message", content=content
         )
+        print(f"✅ Réponse envoyée")
 
 
 if __name__ == "__main__":
@@ -207,14 +205,18 @@ if __name__ == "__main__":
         from .mcp_client import McpClient
 
         mcp_client = McpClient(mcp_url)
-        logger.info(f"Client MCP initialisé: {mcp_url}")
+        print(f"🔗 Connexion MCP: {mcp_url}...")
 
     agent = ElektraAgent(
         mistral_key, os.getenv("MISTRAL_MODEL", "mistral-small-latest"), mcp_client
     )
     bot = ElektraMatrixBot(agent)
 
+    # Connexion MCP au démarrage
+    if mcp_client:
+        asyncio.run(mcp_client.connect())
+
     try:
         asyncio.run(bot.start())
     except KeyboardInterrupt:
-        logger.info("Arrêt du bot...")
+        print("⏹️ Arrêt du bot...")

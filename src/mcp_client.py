@@ -1,99 +1,63 @@
 #!/usr/bin/env python3
 """
-Client MCP pour Elektra
+Client MCP pour Elektra - Utilise le même SDK que le serveur
 
-Permet à l'agent de se connecter au MCP Server et d'exécuter des outils.
+Permet à l'agent de se connecter au MCP Server via Streamable HTTP.
 """
 
-import asyncio
-import json
 import logging
 import os
 from typing import Any, Dict, Optional
 
-import aiohttp
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import StreamableHTTPTransport
 from dotenv import load_dotenv
 
 logger = logging.getLogger("elektra.mcp")
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s - %(message)s")
 
 load_dotenv()
 
 
 class McpClient:
-    """Client pour interagir avec le serveur MCP."""
+    """Client MCP officiel utilisant Streamable HTTP (même SDK que le serveur)."""
 
     def __init__(self, server_url: Optional[str] = None):
         self.server_url = server_url or os.getenv(
             "MCP_SERVER_URL", "http://localhost:8000"
         )
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.tools_cache: Optional[Dict[str, Any]] = None
+        self._transport: Optional[StreamableHTTPTransport] = None
+        self._session: Optional[ClientSession] = None
 
-    async def __aenter__(self):
-        """Contexte async entry."""
-        self.session = aiohttp.ClientSession()
-        return self
+    async def connect(self) -> bool:
+        """Établit la connexion au serveur MCP."""
+        try:
+            self._transport = StreamableHTTPTransport(url=f"{self.server_url}/mcp")
+            async with self._transport as session:
+                self._session = session
+                return True
+        except Exception as e:
+            print(f"❌ Connexion MCP échouée: {e}")
+            return False
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Contexte async exit."""
-        if self.session:
-            await self.session.close()
+    async def list_tools(self) -> list:
+        """Liste les tools disponibles."""
+        if not self._session:
+            return []
+        result = await self._session.list_tools()
+        return result.tools if hasattr(result, "tools") else []
 
-    async def _call_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Appelle un tool MCP via l'endpoint /mcp."""
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
-        }
-
-        async with self.session.post(
-            f"{self.server_url}/mcp",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise Exception(f"MCP Error {response.status}: {error_text}")
-
-            result = await response.json()
-
-            if "error" in result:
-                raise Exception(f"MCP Tool Error: {result['error']}")
-
-            return result.get("result", {})
-
-    async def get_tools(self) -> Dict[str, Any]:
-        """Récupère la liste des tools disponibles."""
-        if self.tools_cache:
-            return self.tools_cache
-
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-
-        async with self.session.post(
-            f"{self.server_url}/mcp",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            result = await response.json()
-            self.tools_cache = result.get("result", {})
-            return self.tools_cache
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+        """Appelle un tool MCP."""
+        if not self._session:
+            raise Exception("Pas de connexion MCP")
+        return await self._session.call_tool(name, arguments)
 
     async def run_command(
         self, command: str, cwd: Optional[str] = None, timeout: int = 30
     ) -> Dict[str, Any]:
         """Exécute une commande système."""
-        logger.info(f"MCP run_command: {command[:50]}...")
-        return await self._call_tool(
+        return await self.call_tool(
             "run_command", {"command": command, "cwd": cwd, "timeout": timeout}
         )
 
@@ -101,8 +65,7 @@ class McpClient:
         self, args: str, cwd: Optional[str] = None, timeout: int = 120
     ) -> Dict[str, Any]:
         """Exécute une commande npm."""
-        logger.info(f"MCP run_npm: {args}")
-        return await self._call_tool(
+        return await self.call_tool(
             "run_npm", {"args": args, "cwd": cwd, "timeout": timeout}
         )
 
@@ -114,31 +77,43 @@ class McpClient:
         timeout: int = 60,
     ) -> Dict[str, Any]:
         """Exécute un script Python."""
-        logger.info(f"MCP run_python: {script[:50]}...")
-        return await self._call_tool(
+        return await self.call_tool(
             "run_python",
             {"script": script, "args": args, "cwd": cwd, "timeout": timeout},
         )
 
     async def get_system_info(self) -> Dict[str, Any]:
         """Récupère les informations système."""
-        return await self._call_tool("get_system_info", {})
+        return await self.call_tool("get_system_info", {})
 
     async def check_docker(self, action: str = "ps") -> Dict[str, Any]:
         """Vérifie l'état de Docker."""
-        return await self._call_tool("check_docker", {"action": action})
+        return await self.call_tool("check_docker", {"action": action})
+
+    async def elektra_chat(self, message: str, session_id: str = "default") -> str:
+        """Envoie un message à Elektra."""
+        result = await self.call_tool(
+            "elektra_chat", {"message": message, "session_id": session_id}
+        )
+        if hasattr(result, "content"):
+            return str(
+                result.content[0].text
+                if hasattr(result.content[0], "text")
+                else result.content[0]
+            )
+        return str(result)
 
     async def health_check(self) -> bool:
         """Vérifie que le serveur MCP est joignable."""
+        import aiohttp
+
         try:
-            if not self.session:
-                self.session = aiohttp.ClientSession()
-            async with self.session.get(
-                f"{self.server_url}/health", timeout=aiohttp.ClientTimeout(total=5)
-            ) as response:
-                return response.status == 200
-        except Exception as e:
-            logger.warning(f"Health check failed: {e}")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.server_url}/health", timeout=aiohttp.ClientTimeout(total=5)
+                ) as response:
+                    return response.status == 200
+        except:
             return False
 
 
@@ -147,10 +122,10 @@ async def create_mcp_client() -> Optional[McpClient]:
     client = McpClient()
 
     if await client.health_check():
-        logger.info(f"Connecté au MCP Server: {client.server_url}")
-        tools = await client.get_tools()
-        logger.info(f"Tools disponibles: {list(tools.get('tools', []))}")
-        return client
-    else:
-        logger.warning(f"MCP Server non accessible: {client.server_url}")
-        return None
+        if await client.connect():
+            tools = await client.list_tools()
+            print(f"✅ MCP Connecté - Tools: {len(tools)}")
+            return client
+
+    print(f"⚠️ MCP Server non accessible: {client.server_url}")
+    return None
