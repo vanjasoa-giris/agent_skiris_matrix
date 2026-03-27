@@ -1,0 +1,6 @@
+matrix-nio[sso]
+python-dotenv
+mcp[cli]
+openai
+mistralai
+markdown
