@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "shell": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-shell"],
+      "env": {
+        "SHELL": "powershell"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/USER/Documents/Giris"],
+      "env": {}
+    },
+    "python": {
+        "command": "python",
+        "args": ["-m", "mcp_server_python"],
+        "env": {}
+    }
+  }
+}

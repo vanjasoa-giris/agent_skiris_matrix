@@ -4,3 +4,4 @@ mcp[cli]
 openai
 mistralai
 markdown
+aiohttp
