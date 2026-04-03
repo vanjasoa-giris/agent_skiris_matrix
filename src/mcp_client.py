@@ -1,175 +1,136 @@
 #!/usr/bin/env python3
 """
-Client MCP pour Elektra - Utilise HTTP simple pour appeler les tools
-
-Note: Le SDK MCP a des problèmes de compatibilité avec httpx.
-Cette implémentation utilise httpx directement pour appeler les tools.
+Client MCP pour Elektra - Utilise le SDK officiel MCP (mcp[cli]).
+Compatible avec le transport Streamable HTTP (SSE).
 """
 
 import logging
 import os
-from typing import Any, Dict, Optional
+import asyncio
+from contextlib import AsyncExitStack
+from typing import Any, Dict, List, Optional
 
-import httpx
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 from dotenv import load_dotenv
 
 logger = logging.getLogger("elektra.mcp")
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s - %(message)s")
-
 load_dotenv()
 
-
 class McpClient:
-    """Client MCP utilisant HTTP simple (plus stable que le SDK)."""
+    """Client MCP utilisant le SDK officiel pour gérer les sessions et le transport SSE."""
 
     def __init__(self, server_url: Optional[str] = None):
-        self.server_url = server_url or os.getenv(
-            "MCP_SERVER_URL", "http://localhost:8000"
-        )
-        self._client: Optional[httpx.AsyncClient] = None
+        # On s'assure que l'URL pointe bien vers l'endpoint /mcp du serveur
+        url = server_url or os.getenv("MCP_SERVER_URL", "http://localhost:8000")
+        if not url.endswith("/mcp"):
+            url = f"{url.rstrip('/')}/mcp"
+        self.server_url = url
+        
+        self._exit_stack = AsyncExitStack()
+        self.session: Optional[ClientSession] = None
 
     async def connect(self) -> bool:
-        """Établit la connexion au serveur MCP."""
+        """Établit la connexion SSE et initialise la session MCP via le SDK."""
         try:
-            self._client = httpx.AsyncClient()
-            # Test avec un health check
-            resp = await self._client.get(f"{self.server_url}/health")
-            if resp.status_code == 200:
-                print(f"[MCP] Connecte: {self.server_url}")
-                return True
-            return False
+            print(f"[MCP] Connexion SSE à {self.server_url}...")
+            
+            # 1. Établir le transport SSE
+            # sse_client retourne un tuple (read_stream, write_stream)
+            streams = await self._exit_stack.enter_async_context(sse_client(self.server_url))
+            read, write = streams
+            
+            # 2. Créer la session MCP sur ces flux
+            self.session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+            
+            # 3. Initialiser la session (handshake obligatoire)
+            await self.session.initialize()
+            
+            print(f"[MCP] Session initialisée avec succès.")
+            return True
+            
         except Exception as e:
-            print(f"[MCP] Erreur connexion: {e}")
+            print(f"[MCP] Échec de connexion au SDK: {e}")
+            await self.close()
             return False
 
     async def close(self):
-        """Ferme le client."""
-        if self._client:
-            await self._client.aclose()
+        """Ferme proprement la session et le transport."""
+        await self._exit_stack.aclose()
+        self.session = None
 
-    async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Appelle un tool MCP via JSON-RPC."""
-        if not self._client:
-            raise Exception("Pas de connexion MCP")
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        }
-
-        resp = await self._client.post(
-            f"{self.server_url}/mcp", json=payload, timeout=60.0
-        )
-        if resp.status_code != 200:
-            raise Exception(f"MCP Error {resp.status_code}: {resp.text}")
-
-        result = resp.json()
-        if "error" in result:
-            raise Exception(f"MCP Tool Error: {result['error']}")
-
-        return result.get("result", {})
-
-    async def list_tools(self) -> list:
-        """Liste les tools disponibles."""
-        if not self._client:
+    async def list_tools(self) -> List[Any]:
+        """Liste les outils disponibles via le SDK."""
+        if not self.session:
+            return []
+        try:
+            result = await self.session.list_tools()
+            # Le SDK retourne un objet ToolsList qui a un attribut 'tools'
+            return result.tools
+        except Exception as e:
+            logger.error(f"Erreur lors de la liste des outils: {e}")
             return []
 
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-
-        resp = await self._client.post(
-            f"{self.server_url}/mcp", json=payload, timeout=30.0
-        )
-        result = resp.json()
-        tools = result.get("result", {}).get("tools", [])
-        return tools
-
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
-        """Appelle un tool MCP."""
-        result = await self._call_tool(name, arguments)
-
-        # Extraire le content
-        if isinstance(result, dict) and "content" in result:
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        """Appelle un outil MCP et retourne le texte du contenu."""
+        if not self.session:
+            return "❌ Erreur: Client MCP non connecté."
+            
+        try:
+            # Appel via le SDK
+            result = await self.session.call_tool(name, arguments)
+            
+            # Extraction du contenu textuel du résultat
             texts = []
-            for item in result["content"]:
-                if item.get("type") == "text":
-                    texts.append(item.get("text", ""))
+            for content in result.content:
+                if hasattr(content, 'text'):
+                    texts.append(content.text)
+                elif isinstance(content, dict) and content.get('type') == 'text':
+                    texts.append(content.get('text', ''))
+            
             return "\n".join(texts)
-        return result
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'appel de l'outil {name}: {e}")
+            return f"❌ Erreur lors de l'exécution de l'outil: {e}"
 
-    async def run_command(
-        self, command: str, cwd: Optional[str] = None, timeout: int = 30
-    ) -> Dict[str, Any]:
-        """Exécute une commande système."""
-        return await self._call_tool(
-            "run_command", {"command": command, "cwd": cwd, "timeout": timeout}
-        )
+    # --- Méthodes de commodité pour correspondre à l'usage dans main.py ---
 
-    async def run_npm(
-        self, args: str, cwd: Optional[str] = None, timeout: int = 120
-    ) -> Dict[str, Any]:
-        """Exécute une commande npm."""
-        return await self._call_tool(
-            "run_npm", {"args": args, "cwd": cwd, "timeout": timeout}
-        )
+    async def run_command(self, command: str) -> Dict[str, Any]:
+        """Compatibilité avec l'ancienne signature."""
+        output = await self.call_tool("run_command", {"command": command})
+        return {"stdout": output, "stderr": ""}
 
-    async def run_python(
-        self,
-        script: str,
-        args: Optional[str] = None,
-        cwd: Optional[str] = None,
-        timeout: int = 60,
-    ) -> Dict[str, Any]:
-        """Exécute un script Python."""
-        return await self._call_tool(
-            "run_python",
-            {"script": script, "args": args, "cwd": cwd, "timeout": timeout},
-        )
+    async def run_npm(self, args: str) -> Dict[str, Any]:
+        """Compatibilité avec l'ancienne signature."""
+        output = await self.call_tool("run_npm", {"args": args})
+        return {"stdout": output, "stderr": ""}
 
-    async def get_system_info(self) -> Dict[str, Any]:
-        """Récupère les informations système."""
-        return await self._call_tool("get_system_info", {})
-
-    async def check_docker(self, action: str = "ps") -> Dict[str, Any]:
-        """Vérifie l'état de Docker."""
-        return await self._call_tool("check_docker", {"action": action})
-
-    async def elektra_chat(self, message: str, session_id: str = "default") -> str:
-        """Envoie un message à Elektra."""
-        result = await self._call_tool(
-            "elektra_chat", {"message": message, "session_id": session_id}
-        )
-
-        # Extraire le texte de la réponse
-        if isinstance(result, dict) and "content" in result:
-            texts = []
-            for item in result["content"]:
-                if item.get("type") == "text":
-                    texts.append(item.get("text", ""))
-            return "\n".join(texts)
-        return str(result)
+    async def run_python(self, script: str) -> Dict[str, Any]:
+        """Compatibilité avec l'ancienne signature."""
+        output = await self.call_tool("run_python", {"script": script})
+        return {"stdout": output, "stderr": ""}
 
     async def health_check(self) -> bool:
-        """Vérifie que le serveur MCP est joignable."""
+        """Vérifie sommairement la disponibilité du serveur."""
+        import httpx
         try:
+            # On vérifie la route /health simple de Starlette avant de lancer le SDK
+            health_url = self.server_url.replace("/mcp", "/health")
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self.server_url}/health", timeout=5.0)
+                resp = await client.get(health_url, timeout=5.0)
                 return resp.status_code == 200
         except:
             return False
 
-
 async def create_mcp_client() -> Optional[McpClient]:
-    """Crée et teste un client MCP."""
+    """Factory pour créer et connecter le client SDK."""
     client = McpClient()
-
     if await client.health_check():
         if await client.connect():
             tools = await client.list_tools()
-            tool_names = [t.get("name", "") for t in tools]
-            print(f"[MCP] Tools: {len(tool_names)}")
+            print(f"[MCP] Outils détectés: {len(tools)}")
             return client
-
-    print(f"[MCP] Non accessible: {client.server_url}")
+    
+    print(f"[MCP] Le serveur à {client.server_url} ne répond pas.")
     return None

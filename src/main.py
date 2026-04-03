@@ -191,7 +191,7 @@ class ElektraMatrixBot:
         print(f"✅ Réponse envoyée")
 
 
-if __name__ == "__main__":
+async def main():
     # Injection de dépendance (Refactoring: Dependency Injection)
     mistral_key = os.getenv("MISTRAL_API_KEY")
     if not mistral_key:
@@ -203,20 +203,27 @@ if __name__ == "__main__":
     mcp_url = os.getenv("MCP_SERVER_URL")
     if mcp_url:
         from .mcp_client import McpClient
-
         mcp_client = McpClient(mcp_url)
         print(f"🔗 Connexion MCP: {mcp_url}...")
+        # On tente la connexion. Si elle échoue, on continue sans MCP.
+        if not await mcp_client.connect():
+            mcp_client = None
 
     agent = ElektraAgent(
         mistral_key, os.getenv("MISTRAL_MODEL", "mistral-small-latest"), mcp_client
     )
     bot = ElektraMatrixBot(agent)
 
-    # Connexion MCP au démarrage
-    if mcp_client:
-        asyncio.run(mcp_client.connect())
-
     try:
-        asyncio.run(bot.start())
+        await bot.start()
     except KeyboardInterrupt:
         print("⏹️ Arrêt du bot...")
+    finally:
+        if mcp_client:
+            await mcp_client.close()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

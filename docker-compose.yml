@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+  # ============================================================================
+  # Elektra Matrix Agent - The Bot itself
+  # ============================================================================
+  elektra-matrix:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: elektra-matrix-bot
+    restart: unless-stopped
+    
+    # Environment variables (loads from .env by default)
+    env_file:
+      - .env
+    
+    environment:
+      # Matrix Connection
+      MATRIX_URL: ${MATRIX_URL:-https://matrix.org}
+      MATRIX_USER: ${MATRIX_USER}
+      MATRIX_PASS: ${MATRIX_PASS}
+      
+      # AI Model
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      MISTRAL_MODEL: ${MISTRAL_MODEL:-mistral-small-latest}
+      
+      # MCP Server Connection
+      # Points to the MCP server service name (if in the same network)
+      # or to a host IP/Domain if external
+      MCP_SERVER_URL: ${MCP_SERVER_URL:-http://elektra-mcp-server:8000/mcp}
+      
+      # Logs and Config
+      LOG_LEVEL: ${LOG_LEVEL:-WARNING}
+      AGENT_SYSTEM_PROMPT: ${AGENT_SYSTEM_PROMPT:-Tu es Elektra, une assistante DevOps experte.}
+
+    # Network configuration
+    networks:
+      - elektra-net
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  # This network must be shared with the MCP Server to communicate via service name
+  elektra-net:
+    external: true
+    # Note: Use 'docker network create elektra-net' before running this
+    # if it doesn't exist.
